@@ -1,0 +1,275 @@
+// LandSure BD - Prisma Schema (PostgreSQL)
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  CITIZEN
+  ADMIN
+  REVIEWER
+}
+
+enum VerificationStatus {
+  PENDING
+  FILE_INTEGRITY_PASSED
+  RECORD_MATCH
+  WARNING
+  NEEDS_MANUAL_REVIEW
+  REFERENCE_UNAVAILABLE
+  REJECTED
+  SUPERSEDED
+}
+
+enum AlertSeverity {
+  INFORMATIONAL
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+enum TransactionStatus {
+  DRAFT
+  SUBMITTED
+  AWAITING_BUYER
+  VERIFICATION_PENDING
+  WARNING
+  NEEDS_MANUAL_REVIEW
+  AWAITING_OFFICIAL_TRANSFER_EVIDENCE
+  APPROVED_FOR_RECORD_UPDATE
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+model User {
+  id               String   @id @default(uuid())
+  fullName         String
+  phone            String   @unique
+  email            String?  @unique
+  passwordHash     String
+  role             Role     @default(CITIZEN)
+  address          String?
+  nidMasked        String?
+  isVerified       Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  parcels          OwnershipClaim[]
+  documents        Document[]
+  transactionsAsSeller LandTransaction[] @relation("SellerTransactions")
+  transactionsAsBuyer  LandTransaction[] @relation("BuyerTransactions")
+  adminRequests    AdminUpdateRequest[] @relation("TargetUserRequests")
+  createdRequests  AdminUpdateRequest[] @relation("AdminAuthorRequests")
+  auditEvents      AuditEvent[]
+}
+
+model LandParcel {
+  id                 String             @id @default(uuid())
+  internalParcelId   String             @unique
+  district           String
+  upazila            String
+  mouza              String
+  jlNumber           String?
+  khatianNumber      String
+  plotNumber         String
+  surveyType         String             // CS, SA, RS, BS, City Survey
+  totalArea          Float              // e.g. in decimals
+  areaUnit           String             @default("decimal") // decimal, acre, sqft
+  sourceDeedRef      String?
+  verificationStatus VerificationStatus @default(PENDING)
+  notes              String?
+  isDisputed         Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  owners             OwnershipClaim[]
+  documents          Document[]
+  transactions       LandTransaction[]
+  fraudAlerts        FraudAlert[]
+  updateRequests     AdminUpdateRequest[]
+
+  @@index([district, upazila, mouza, plotNumber])
+  @@index([khatianNumber])
+}
+
+model OwnershipClaim {
+  id                   String   @id @default(uuid())
+  parcelId             String
+  userId               String
+  claimedShare         Float    // 0.0 to 1.0 (or percentage / decimal portion)
+  recordSupportedShare Float    // Verified / reference supported share
+  status               String   @default("CLAIMED") // CLAIMED, CONFIRMED, DISPUTED
+  acquisitionMethod    String   // PURCHASE, INHERITANCE, GIFT, HEBA, ALLOTMENT
+  acquisitionDate      String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  parcel               LandParcel @relation(fields: [parcelId], references: [id], onDelete: Cascade)
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([parcelId, userId])
+}
+
+model Document {
+  id                 String             @id @default(uuid())
+  documentId         String             @unique
+  category           String             // REGISTERED_DEED, BAYA_DEED, KHATIAN_PORCHA, MUTATION_ORDER, TAX_RECEIPT, MOUZA_MAP
+  parcelId           String?
+  uploaderId         String
+  originalFilename   String
+  storagePath        String
+  fileSizeBytes      Int
+  mimeType           String
+  sha256Hash         String
+  verificationStatus VerificationStatus @default(PENDING)
+  reviewNotes        String?
+  version            Int                @default(1)
+  referenceSource    String?
+  isDigitallySigned  Boolean            @default(false)
+  publicToken        String             @unique @default(uuid())
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  parcel             LandParcel?        @relation(fields: [parcelId], references: [id])
+  uploader           User               @relation(fields: [uploaderId], references: [id])
+  verificationReport VerificationReport?
+  evidenceIn         TransactionEvidence[]
+}
+
+model VerificationReport {
+  id                   String             @id @default(uuid())
+  documentId           String             @unique
+  parcelId             String?
+  fileIntegrityPassed  Boolean            @default(false)
+  referenceHashMatched Boolean            @default(false)
+  recordMatchStatus    String             @default("PENDING") // MATCHED, MISMATCH, INCONCLUSIVE
+  discrepanciesJson    String?            // JSON details
+  overallStatus        VerificationStatus @default(PENDING)
+  reviewerNotes        String?
+  verifiedAt           DateTime           @default(now())
+
+  document             Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model FraudAlert {
+  id                   String        @id @default(uuid())
+  alertId              String        @unique
+  category             String        // DUPLICATE_SALE, CONFLICTING_OWNERSHIP, SHARE_EXCEEDED, MUTATION_MISMATCH, CHRONOLOGY_ERROR
+  parcelId             String?
+  relatedTxId          String?
+  relatedDocId         String?
+  severity             AlertSeverity @default(MEDIUM)
+  title                String
+  explanation          String
+  conflictingFieldsJson String?
+  evidenceSource       String?
+  status               AlertStatus   @default(OPEN)
+  reviewerNotes        String?
+  detectedAt           DateTime      @default(now())
+  resolvedAt           DateTime?
+
+  parcel               LandParcel?   @relation(fields: [parcelId], references: [id])
+}
+
+model LandTransaction {
+  id                   String            @id @default(uuid())
+  txReference          String            @unique
+  parcelId             String
+  sellerId             String
+  buyerId              String
+  proposedArea         Float
+  proposedShare        Float             // 0.0 to 1.0 fraction of parcel
+  status               TransactionStatus @default(DRAFT)
+  sellerConsent        Boolean           @default(false)
+  buyerConsent         Boolean           @default(false)
+  rejectionReason      String?
+  transferNotes        String?
+  completedAt          DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  parcel               LandParcel        @relation(fields: [parcelId], references: [id])
+  seller               User              @relation("SellerTransactions", fields: [sellerId], references: [id])
+  buyer                User              @relation("BuyerTransactions", fields: [buyerId], references: [id])
+  evidences            TransactionEvidence[]
+
+  @@index([sellerId])
+  @@index([buyerId])
+}
+
+model TransactionEvidence {
+  id             String          @id @default(uuid())
+  transactionId  String
+  documentId     String
+  evidenceType   String
+  notes          String?
+  submittedAt    DateTime        @default(now())
+
+  transaction    LandTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  document       Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model AdminUpdateRequest {
+  id             String    @id @default(uuid())
+  requestId      String    @unique
+  parcelId       String
+  targetUserId   String
+  adminAuthorId  String
+  fieldName      String
+  oldValue       String
+  proposedValue  String
+  reason         String
+  status         String    @default("PENDING_USER_CONSENT") // PENDING_USER_CONSENT, APPROVED, REJECTED, APPLIED
+  userOtpRequired Boolean  @default(true)
+  otpVerified    Boolean   @default(false)
+  reviewedBy     String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  parcel         LandParcel @relation(fields: [parcelId], references: [id])
+  targetUser     User       @relation("TargetUserRequests", fields: [targetUserId], references: [id])
+  adminAuthor    User       @relation("AdminAuthorRequests", fields: [adminAuthorId], references: [id])
+}
+
+model OTPChallenge {
+  id        String   @id @default(uuid())
+  phone     String
+  codeHash  String
+  purpose   String   // LOGIN, SENSITIVE_UPDATE, TRANSFER_CONFIRM
+  expiresAt DateTime
+  isUsed    Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid())
+  eventHash    String   @unique
+  previousHash String?
+  actorId      String?
+  actorRole    String
+  action       String   // e.g., USER_REGISTER, DOC_UPLOADED, FRAUD_ALERT_RAISED, ADMIN_UPDATE_REQUESTED, SHARE_TRANSFERRED
+  targetType   String   // USER, LAND_PARCEL, DOCUMENT, TRANSACTION, ADMIN_REQUEST
+  targetId     String
+  reason       String?
+  oldValues    String?  // JSON string
+  newValues    String?  // JSON string
+  outcome      String   // SUCCESS, FAILED, BLOCKED
+  ipAddress    String?
+  timestamp    DateTime @default(now())
+
+  actor        User?    @relation(fields: [actorId], references: [id])
+}

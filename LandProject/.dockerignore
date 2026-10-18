@@ -1,0 +1,6 @@
+node_modules
+.git
+.bin
+backend/data/store.json
+frontend/dist
+backend/dist
